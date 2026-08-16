@@ -799,7 +799,6 @@ export default function GraphvizApp() {
   const [outputTab, setOutputTab] = useState("code");
   const [copied, setCopied] = useState(false);
   const [preview, setPreview] = useState(null); // { src, format }
-  const [previewFormat, setPreviewFormat] = useState("png");
   const [rendering, setRendering] = useState(false);
   const [renderProgress, setRenderProgress] = useState(0);
   const [renderError, setRenderError] = useState(null);
@@ -1689,8 +1688,9 @@ export default function GraphvizApp() {
   /* ----- preview render ----- */
   const renderRequestId = useRef(0);
 
+  // The server renders with the Graphviz WASM build, which emits SVG only.
   const renderPreview = useCallback(
-    async (format = previewFormat) => {
+    async () => {
       const requestId = ++renderRequestId.current;
       setRendering(true);
       setRenderError(null);
@@ -1710,7 +1710,6 @@ export default function GraphvizApp() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             dotCode: generateDot(docRef.current),
-            format,
             engine: attrs.preservePositions ? "neato" : attrs.engine,
             fixedPositions: attrs.preservePositions === true,
           }),
@@ -1736,7 +1735,7 @@ export default function GraphvizApp() {
         finish();
       }
     },
-    [previewFormat, later]
+    [later]
   );
 
   /* ----- auto-layout ----- */
@@ -2141,20 +2140,6 @@ export default function GraphvizApp() {
                   </>
                 ) : (
                   <>
-                    <div className="gv-segmented">
-                      {["png", "svg"].map((f) => (
-                        <button
-                          key={f}
-                          className={cx("gv-seg-btn", previewFormat === f && "gv-seg-btn-active")}
-                          onClick={() => {
-                            setPreviewFormat(f);
-                            renderPreview(f);
-                          }}
-                        >
-                          {f.toUpperCase()}
-                        </button>
-                      ))}
-                    </div>
                     <button
                       className="gv-btn gv-btn-primary"
                       onClick={() => renderPreview()}
@@ -2202,7 +2187,7 @@ export default function GraphvizApp() {
                       <div style={{ color: "var(--gv-ink-faint)", fontSize: 13, textAlign: "center" }}>
                         Click <strong>Render</strong> to preview the diagram.
                         <br />
-                        Requires the <span className="gv-kbd">dot</span> binary on PATH.
+                        Rendered as SVG by the Graphviz engine.
                       </div>
                     )}
                   </div>

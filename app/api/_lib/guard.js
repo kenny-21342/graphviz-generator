@@ -1,14 +1,13 @@
 /**
- * Request guards for the endpoints that hand user-supplied DOT to a
- * Graphviz subprocess.
+ * Request guards for the endpoints that hand user-supplied DOT to Graphviz.
  */
 
 import { NextResponse } from "next/server";
 
-/** Largest DOT source we will write to disk and lay out. */
+/** Largest DOT source we will lay out. */
 export const MAX_DOT_BYTES = 256 * 1024;
 
-/** Concurrent Graphviz processes allowed across all requests. */
+/** Concurrent Graphviz layouts allowed across all requests. */
 const MAX_CONCURRENT = 4;
 /** How long a request will wait for a slot before giving up. */
 const QUEUE_TIMEOUT_MS = 15000;
@@ -84,7 +83,7 @@ function releaseSlot() {
 
 /**
  * Run `fn` while holding one of a fixed number of render slots, so a burst of
- * requests cannot spawn unbounded Graphviz processes.
+ * requests cannot start unbounded concurrent Graphviz layouts.
  */
 export async function withRenderSlot(fn) {
   if (active >= MAX_CONCURRENT) {

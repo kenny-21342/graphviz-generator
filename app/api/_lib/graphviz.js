@@ -1,88 +1,74 @@
-import { execFile } from "child_process";
-import { promisify } from "util";
-import { access, constants } from "fs/promises";
+/**
+ * Graphviz via WebAssembly.
+ *
+ * The API routes used to shell out to the native `dot` binary with
+ * `child_process.execFile`, which meant the app could only be deployed to a
+ * host where Graphviz was installed and on PATH. `@hpcc-js/wasm-graphviz`
+ * ships the whole of Graphviz as a WASM module, so layout and rendering run
+ * in-process and the app deploys anywhere Node runs — Vercel included.
+ */
 
-const execFileAsync = promisify(execFile);
+import { Graphviz } from "@hpcc-js/wasm-graphviz";
 
 /** Layout engines the API is willing to run. */
 export const ENGINES = ["dot", "neato", "fdp", "sfdp", "circo", "twopi"];
 
 export const resolveEngine = (name) => (ENGINES.includes(name) ? name : "dot");
 
-// Cache of resolved binary paths: name -> absolute path (or the bare name).
-const resolved = new Map();
-
-// Directories where Graphviz binaries commonly live, even when the user's
-// login-shell PATH (and thus the PATH Node inherited at launch) does not
-// include them. Order matters: we check the bare PATH first, then these.
-const FALLBACK_DIRS = [
-  "/opt/homebrew/bin", // Apple Silicon Homebrew
-  "/usr/local/bin", // Intel Homebrew / manual installs
-  "/usr/bin", // Linux distro packages
-  "/opt/local/bin", // MacPorts
-];
-
-async function pathExists(p) {
-  try {
-    await access(p, constants.X_OK);
-    return true;
-  } catch {
-    return false;
+/** Error thrown when Graphviz rejects the supplied DOT source. */
+export class GraphvizError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "GraphvizError";
   }
 }
 
-/**
- * Resolve a Graphviz binary (e.g. "dot", "neato") to an absolute path.
- *
- * `child_process.execFile` does NOT run a login shell, so the PATH that
- * Node sees is whatever the launching process had. When launched from an
- * IDE, GUI app, or service manager, that PATH frequently omits the
- * directory where Homebrew/MacPorts installed Graphviz
- * (e.g. /opt/homebrew/bin on Apple Silicon). The bare `dot` command then
- * fails with ENOENT even though `which dot` works in a terminal.
- *
- * This resolver:
- *   1. First trusts PATH and runs the bare command.
- *   2. On any *spawn* failure, probes FALLBACK_DIRS for an executable.
- *   3. Caches only successful resolutions.
- */
-export async function resolveBinary(name) {
-  if (resolved.has(name)) return resolved.get(name);
+// The WASM module is compiled and instantiated once per process and reused by
+// every request. A failed load is not cached, so a transient failure does not
+// permanently break the route.
+let instance = null;
 
-  // 1. Try the bare command via PATH.
+async function getGraphviz() {
+  if (!instance) {
+    instance = Graphviz.load().catch((err) => {
+      instance = null;
+      throw err;
+    });
+  }
+  return instance;
+}
+
+/**
+ * Lay out / render DOT source.
+ *
+ * @param {string} dotSource DOT-language graph.
+ * @param {object} opts
+ * @param {"svg"|"plain"} [opts.format] Output format.
+ * @param {string} [opts.engine] Layout engine name (validated by `resolveEngine`).
+ * @param {boolean} [opts.fixedPositions] Use the `pos` attributes already in the
+ *   source instead of computing a layout — the WASM equivalent of `dot -n`.
+ * @returns {Promise<string>} The rendered output.
+ * @throws {GraphvizError} when the source is invalid or produces no output.
+ */
+export async function runGraphviz(dotSource, { format = "svg", engine = "dot", fixedPositions = false } = {}) {
+  const graphviz = await getGraphviz();
+
+  let out;
   try {
-    await execFileAsync(name, ["-V"]);
-    resolved.set(name, name);
-    return name;
+    // `layout` is synchronous inside the WASM module, so there is no
+    // subprocess to time out or kill; a pathological graph blocks this
+    // request only. The concurrency cap in guard.js still bounds how many
+    // can run at once.
+    out = graphviz.layout(dotSource, format, resolveEngine(engine), fixedPositions ? { nop: 1 } : undefined);
   } catch (err) {
-    // A numeric `code` is an exit status, which means the binary ran — some
-    // builds exit non-zero for -V. A string code (ENOENT, EACCES, EAGAIN…)
-    // is a spawn failure, so keep probing instead of caching a false hit.
-    if (typeof err?.code === "number") {
-      resolved.set(name, name);
-      return name;
-    }
+    // Graphviz reports parse/layout problems as a thrown Error whose message
+    // is the diagnostic ("syntax error in line 1 near '}'"). No filesystem
+    // paths are involved, since nothing is ever written to disk.
+    throw new GraphvizError(String(err?.message || err || "Graphviz failed"));
   }
 
-  // 2. Probe fallback directories for an executable file.
-  for (const dir of FALLBACK_DIRS) {
-    const candidate = `${dir}/${name}`;
-    if (await pathExists(candidate)) {
-      resolved.set(name, candidate);
-      return candidate;
-    }
+  if (typeof out !== "string" || !out) {
+    throw new GraphvizError("Graphviz produced no output.");
   }
-
-  // 3. Not found. Deliberately not cached: a transient spawn failure (EAGAIN
-  //    under load) must not permanently mark the binary as missing.
-  return name;
-}
-
-/**
- * Run a Graphviz binary, resolving its path first. Same API as
- * execFileAsync but with a `name` -> absolute-path resolution layer.
- */
-export async function runGraphviz(name, args, options = {}) {
-  const bin = await resolveBinary(name);
-  return execFileAsync(bin, args, options);
+  return out;
 }

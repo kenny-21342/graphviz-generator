@@ -3,23 +3,17 @@
  *
  * These caught the bug where graph-level attributes were emitted as a bare
  * `[rankdir="TB"]`, which is a syntax error, so every graph the app produced
- * failed to render. Skipped automatically when Graphviz is not installed.
+ * failed to render. Graphviz runs as a WASM module, so these no longer depend
+ * on a `dot` binary being installed.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
-import { promisify } from "node:util";
+
+import { Graphviz } from "@hpcc-js/wasm-graphviz";
 
 import { generateDot } from "../app/lib/dot.js";
 
-const execFileAsync = promisify(execFile);
-
-let hasDot = true;
-try {
-  await execFileAsync("dot", ["-V"]);
-} catch {
-  hasDot = false;
-}
+const graphviz = await Graphviz.load();
 
 const node = (over = {}) => ({
   id: "node_1",
@@ -65,43 +59,29 @@ const baseAttrs = {
   ranksep: 0.75,
 };
 
-function render(dotSource, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn("dot", args);
-    const out = [];
-    const err = [];
-    child.stdout.on("data", (c) => out.push(c));
-    child.stderr.on("data", (c) => err.push(c));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      const stderr = Buffer.concat(err).toString();
-      if (code !== 0) reject(new Error(`dot exited ${code}: ${stderr}`));
-      else resolve({ stdout: Buffer.concat(out), stderr });
-    });
-    child.stdin.end(dotSource);
-  });
+/** @param {{format?: string, engine?: string, nop?: boolean}} opts */
+function render(dotSource, { format = "svg", engine = "dot", nop = false } = {}) {
+  return graphviz.layout(dotSource, format, engine, nop ? { nop: 1 } : undefined);
 }
 
-test("pinned-position DOT renders with -Kneato -n", { skip: !hasDot && "graphviz not installed" }, async () => {
+test("pinned-position DOT renders with neato + nop", async () => {
   const dotSource = generateDot({ ...SAMPLE, graphAttrs: { ...baseAttrs, preservePositions: true } });
-  const { stdout, stderr } = await render(dotSource, ["-Kneato", "-n", "-Tpng"]);
-  assert.equal(stderr.trim(), "");
-  assert.ok(stdout.length > 100, "produced a PNG");
-  assert.equal(stdout.subarray(1, 4).toString(), "PNG");
+  const svg = render(dotSource, { engine: "neato", nop: true });
+  assert.ok(svg.includes("<svg"), "produced an SVG");
+  assert.ok(svg.length > 100);
 });
 
-test("engine-laid-out DOT renders with plain dot", { skip: !hasDot && "graphviz not installed" }, async () => {
+test("engine-laid-out DOT renders with plain dot", async () => {
   const dotSource = generateDot({ ...SAMPLE, graphAttrs: { ...baseAttrs, preservePositions: false } });
-  const { stdout, stderr } = await render(dotSource, ["-Tpng"]);
-  assert.equal(stderr.trim(), "");
-  assert.equal(stdout.subarray(1, 4).toString(), "PNG");
+  const svg = render(dotSource);
+  assert.ok(svg.includes("<svg"));
 });
 
-test("pinned positions survive the round trip through -Tplain", { skip: !hasDot && "graphviz not installed" }, async () => {
+test("pinned positions survive the round trip through -Tplain", async () => {
   const dotSource = generateDot({ ...SAMPLE, graphAttrs: { ...baseAttrs, preservePositions: true } });
-  const { stdout } = await render(dotSource, ["-Kneato", "-n", "-Tplain"]);
+  const plain = render(dotSource, { format: "plain", engine: "neato", nop: true });
   const { parsePlain, toPixelLayout } = await import("../app/api/_lib/plain.js");
-  const { layout } = toPixelLayout(parsePlain(stdout.toString()), { margin: 0 });
+  const { layout } = toPixelLayout(parsePlain(plain), { margin: 0 });
 
   const byId = new Map(layout.map((n) => [n.id, n]));
   // node_1 is at canvas y=80 and node_2 at y=300, so node_1 must stay above it.
@@ -112,16 +92,29 @@ test("pinned positions survive the round trip through -Tplain", { skip: !hasDot 
   assert.ok(byId.get("node_2").x < byId.get("node_3").x);
 });
 
-test("every graph attribute combination stays parseable", { skip: !hasDot && "graphviz not installed" }, async () => {
+test("every graph attribute combination stays parseable", async () => {
   for (const preservePositions of [true, false]) {
     for (const splines of ["spline", "ortho", "line"]) {
       const dotSource = generateDot({
         ...SAMPLE,
         graphAttrs: { ...baseAttrs, splines, bgcolor: "#f0f0f0", preservePositions },
       });
-      const args = preservePositions ? ["-Kneato", "-n", "-Tsvg"] : ["-Tsvg"];
-      const { stdout } = await render(dotSource, args);
-      assert.ok(stdout.toString().includes("<svg"), `svg for splines=${splines}`);
+      const svg = preservePositions
+        ? render(dotSource, { engine: "neato", nop: true })
+        : render(dotSource);
+      assert.ok(svg.includes("<svg"), `svg for splines=${splines}`);
+    }
+  }
+});
+
+test("every supported layout engine produces a parseable plain layout", async () => {
+  const dotSource = generateDot({ ...SAMPLE, graphAttrs: { ...baseAttrs, preservePositions: false } });
+  const { parsePlain } = await import("../app/api/_lib/plain.js");
+  for (const engine of ["dot", "neato", "fdp", "sfdp", "circo", "twopi"]) {
+    const { nodes } = parsePlain(render(dotSource, { format: "plain", engine }));
+    assert.equal(nodes.length, SAMPLE.nodes.length, `${engine} placed every node`);
+    for (const n of nodes) {
+      assert.ok(Number.isFinite(n.xInches) && Number.isFinite(n.yInches), `${engine} placed ${n.id}`);
     }
   }
 });
