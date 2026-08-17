@@ -129,6 +129,11 @@ concurrent renders, refuses attributes that make Graphviz read server files (`im
 `fontpath`, …), and withholds non-syntax diagnostics in production. Rendered SVG is returned as a
 `data:` URI and shown in an `<img>`, never inlined into the DOM.
 
+The routes also share per-IP limits of 20 requests per minute and 300 per hour. Override them with
+`GRAPHVIZ_RATE_LIMIT_PER_MINUTE` and `GRAPHVIZ_RATE_LIMIT_PER_HOUR`. These counters are in memory,
+so a serverless cold start resets them and multiple instances do not share a ceiling. Use a shared
+atomic store when a strict distributed limit is required.
+
 Note that WASM layout is synchronous and cannot be interrupted, so there is no per-render timeout
 the way there was with a killable subprocess; a pathological graph blocks its own request until it
 finishes. The 256 KB source cap and the concurrency limit are what bound that.

@@ -9,6 +9,7 @@ import {
   validateDotPayload,
   withRenderSlot,
 } from "../_lib/guard";
+import { checkRenderRate } from "../_lib/rate-limit";
 import { parsePlain, toPixelLayout } from "../_lib/plain";
 
 // Graphviz runs as a WASM module in-process: no subprocess, no temp files, so
@@ -26,6 +27,14 @@ export async function POST(request) {
 
     const valid = validateDotPayload(dotCode);
     if (!valid.ok) return valid.response;
+
+    const rate = checkRenderRate(request);
+    if (!rate.allowed) {
+      return NextResponse.json(
+        { error: "Too many Graphviz requests. Try again shortly." },
+        { status: 429, headers: { "Retry-After": String(rate.retryAfter) } },
+      );
+    }
 
     const engineName = resolveEngine(engine);
 
